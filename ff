@@ -1,0 +1,131 @@
+#!/usr/bin/env bash
+# ff - Fastfetch wrapper that shows a scaled and centered kitty image using ffmpeg
+
+set -euo pipefail
+
+# Box in CELLS (matches your Fastfetch logo/image block)
+W="${W:-32}" # width in cells
+H="${H:-16}" # height in cells
+X="${X:-1}"  # left offset (cells)
+Y="${Y:-1}"  # top offset  (cells)
+
+# Choose preprocessing tool: ffmpeg | magick | none
+COVER_TOOL="${COVER_TOOL:-auto}"
+
+# Preprocess to a pixel canvas with SAME ASPECT as W:H (any multiple works).
+# Bigger = crisper. This is just for cropping/cover; kitty will scale as needed.
+# This will give you a nice quality image with the same behavior as CSS cover property,
+# the image will be scaled to fit the terminal, then cropped to the desired size.
+# *Note* that the image box cells are not square, so the aspect ratio will be different.
+# 32:16 ≈ 1.7778 ; we'll use 320x160 for nice quality.
+# 9:16 ≈ 1.7778 ; we'll use 900x1600 for nice quality.
+# 3:4 ≈ 1.3333 ; we'll use 300x400 for nice quality.
+# 1:1 ≈ 1.0000 ; we'll use 1000x1250 for nice quality.
+TARGET_WPX="${TARGET_WPX:-1000}"
+TARGET_HPX="${TARGET_HPX:-1250}"
+
+# Choose a random image from the following directory
+# *Note* update this to your image directory
+IMG_DIR="$HOME/Pictures/neofetch"
+CACHE_DIR="$HOME/.cache/fastfetch"
+LOGO_BIN="$CACHE_DIR/image.bin"
+TMP_IMG="$CACHE_DIR/cover_tmp.png"
+FIT_MODE="${FIT_MODE:-cover}" # cover or "contain" you can call 'FIT_MODE=contain ff'
+
+# Make sure the cache directory exists
+mkdir -p "$CACHE_DIR"
+
+# Pick a random image
+IMG=$(find "$IMG_DIR" -type f \( -iname '*.png' -o -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.webp' \) | shuf -n 1)
+[[ -z "$IMG" ]] && {
+        echo "No images found in $IMG_DIR" >&2
+        exit 1
+}
+
+# Hash the image, target size, and fit mode to generate a unique cache filename
+# to be reused for faster replays
+HASH=$(printf '%s|%s|%s|%s|%s' "$IMG" "$TARGET_WPX" "$TARGET_HPX" "$FIT_MODE" "${PAD_HEX:-none}" | sha1sum | cut -d' ' -f1)
+CACHE_IMG="$CACHE_DIR/${HASH}.png"
+
+if [[ -f "$CACHE_IMG" ]]; then
+        # use cached image
+        TMP_IMG="$CACHE_IMG"
+else
+        # Decide which tool to use
+        if [[ "$COVER_TOOL" == "auto" ]]; then
+                if command -v ffmpeg >/dev/null 2>&1; then
+                        COVER_TOOL="ffmpeg"
+                elif command -v magick >/dev/null 2>&1 || command -v convert >/dev/null 2>&1; then
+                        COVER_TOOL="magick"
+                else
+                        COVER_TOOL="none"
+                fi
+        fi
+
+        # Preprocess to "cover" TARGET_WPX x TARGET_HPX (same aspect as 32:16)
+        case "$COVER_TOOL" in
+        ffmpeg)
+                # Scale with cover then crop exact size; -y to overwrite, -loglevel error for clean output
+                if [[ "$FIT_MODE" == "cover" ]]; then
+                        ffmpeg -y -v error -threads 0 -i "$IMG" \
+                                -vf "scale=${TARGET_WPX}:${TARGET_HPX}:force_original_aspect_ratio=increase:flags=fast_bilinear,crop=${TARGET_WPX}:${TARGET_HPX}" \
+                                -frames:v 1 "$TMP_IMG"
+                else
+                        ffmpeg -y -v error -threads 0 -i "$IMG" \
+                                -vf "scale=${TARGET_WPX}:${TARGET_HPX}:force_original_aspect_ratio=decrease:flags=fast_bilinear,format=rgba,\
+              pad=${TARGET_WPX}:${TARGET_HPX}:(ow-iw)/2:(oh-ih)/2:color=black@0" \
+                                -frames:v 1 "$TMP_IMG"
+                fi
+                ;;
+
+        magick)
+                if command -v magick >/dev/null 2>&1; then
+                        magick "$IMG" -resize "${TARGET_WPX}x${TARGET_HPX}^" -gravity center -extent "${TARGET_WPX}x${TARGET_HPX}" "$TMP_IMG"
+                else
+                        # older ImageMagick
+                        convert "$IMG" -resize "${TARGET_WPX}x${TARGET_HPX}^" -gravity center -extent "${TARGET_WPX}x${TARGET_HPX}" "$TMP_IMG"
+                fi
+                ;;
+        none)
+                # No preprocessing; icat will letterbox if aspect differs (not true "cover")
+                cp -f "$IMG" "$TMP_IMG"
+                ;;
+        *)
+                echo "Unknown COVER_TOOL=$COVER_TOOL" >&2
+                exit 1
+                ;;
+        esac
+
+        # Move the temporary image to the cache directory
+        mv -f "$TMP_IMG" "$CACHE_IMG"
+        # Use the cache image now that it's been moved
+        TMP_IMG="$CACHE_IMG"
+fi
+
+# Clear any previous kitty images so old ones don't linger in the terminal
+# *Note* this is not seem to be needed if you're using the kitty-icat type
+# kitty +kitten icat --clear || true
+
+# generate kitty image stream, centered and scaled to cover terminal
+kitty +kitten icat \
+        --clear \
+        -n \
+        --transfer-mode=stream \
+        --place "${W}x${H}@${X}x${Y}" \
+        "$TMP_IMG" >"$LOGO_BIN"
+
+# run fastfetch with raw logo stream
+# fastfetch
+
+# Hide cursor, run fastfetch, then push prompt below the image box (to avoid overlap and flashing cursor movement)
+tput civis
+
+# Tip: make Fastfetch account for the logo block; this helps alignment
+clear
+fastfetch
+
+# Ensure the shell prompt is below the image area (just in case)
+# Print H lines (or fewer if you already set padding); tweak as you like
+# for _ in $(seq 1 "$H"); do printf '\n'; done
+
+tput cnorm
